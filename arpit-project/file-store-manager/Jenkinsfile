@@ -1,0 +1,198 @@
+#!/usr/bin/groovy
+
+
+@Library("jenkins-pipeline-utils") _
+
+String BUILD_NODE_LABELS = 'medium'
+String STASH_PROJECT     = 'eio'
+
+String APPLICATION_NAME      = 'file-store-manager'
+
+String MASTER_BRANCH    = 'master'
+String DEVELOP_BRANCH    = 'develop'
+
+properties([[$class: 'BuildDiscarderProperty',
+                  strategy: [$class: 'LogRotator',
+                  numToKeepStr: '5']]
+           ])
+
+node(BUILD_NODE_LABELS) {
+
+   def repository_credentials = "eio-file-store-manager-project-private-key"
+   def us_east_1 = "ssh://APKA2XQX5UYLL65ECVU7@git-codecommit.us-east-1.amazonaws.com/v1/repos/file-store-manager-repository"
+   def eu_west_1 = "ssh://APKA2XQX5UYLMZB6SZV4@git-codecommit.eu-west-1.amazonaws.com/v1/repos/file-store-manager-repository"
+
+  def evertzio_codeartifact_read = 'evertzio-codeartifact-read'
+
+  String applicationSourceBranch     = getBranchNameFromScm()
+  String applicationTargetBranch     = DEVELOP_BRANCH // Default to development
+  String applicationSourceBranchType = getBranchType(applicationSourceBranch)
+  String applicationTargetBranchType = getBranchType(applicationTargetBranch)
+
+  boolean isPullRequest            = isPullRequestBuild(env.BRANCH_NAME)
+
+  if (isPullRequest) {
+    applicationSourceBranchType = getBranchType(env.BRANCH_NAME) // have to do this otherwise we wont get the correct PR name
+  }
+
+  // variables for build description and summary email
+  String prText        = ''
+  String applicationText = '(unknown)'
+  String prHtml        = ''
+  String applicationHtml = '<i>(unknown)</i>'
+  String applicationVersion = ''
+
+  try {
+    withEnv(["APPLICATION_NAME=${APPLICATION_NAME}"]) {
+
+      stage("Clean Workspace") {
+        echo "Cleaning workspace"
+        deleteDir()
+        echo "Done cleaning workspace"
+      }
+
+      stage('Setup Environment') {
+        applicationText = applicationSourceBranch
+        applicationHtml = "<b>${applicationSourceBranch}</b>"
+        updateBuildDescription(applicationSourceBranchType, prHtml, applicationHtml)
+      }
+
+      stage('Checkout') {
+        echo "Start checkout"
+        dir(APPLICATION_NAME) {
+          if(isPullRequest) {
+            def prDetails = getPullRequestDetails(STASH_PROJECT, APPLICATION_NAME, env.CHANGE_ID)
+
+            applicationTargetBranch = prDetails.toBranch
+            applicationTargetBranchType = getBranchType(applicationTargetBranch)
+            String stashPullRequestUrl = getStashPullRequestUrl(STASH_PROJECT, APPLICATION_NAME, env.CHANGE_ID)
+
+            prText = "Pull Request: ${env.BRANCH_NAME} - ${env.CHANGE_TITLE} - ${stashPullRequestUrl}\n"
+            prHtml = "<a href=\"${stashPullRequestUrl}\">${env.BRANCH_NAME}</a> - <b>${env.CHANGE_TITLE}</b> - <i>${prDetails.author}</i><br/>"
+
+            applicationText = "${applicationSourceBranch} -> ${applicationTargetBranch}"
+            applicationHtml = "<b>${applicationSourceBranch}</b> -> <b>${applicationTargetBranch}</b>"
+            updateBuildDescription(applicationSourceBranchType, prHtml, applicationHtml)
+
+            // checkout and do a local merge into the target branch to ensure there are no conflicts
+            gitCheckoutWithMerge(STASH_PROJECT, APPLICATION_NAME, applicationSourceBranch, applicationTargetBranch)
+          } else {
+            checkout scm // checkout the source branch using default settings
+          }
+
+          String applicationCommitHash = getGitCommitHash(true)
+          String applicationStashCommitUrl = getStashCommitUrl(STASH_PROJECT, APPLICATION_NAME, applicationCommitHash)
+
+          echo "commit SHA: ${applicationCommitHash}"
+          echo "stash commit url: ${applicationStashCommitUrl}"
+
+          applicationText += " - v${applicationVersion} - ${applicationCommitHash} - ${applicationStashCommitUrl}"
+          applicationHtml += " - v<b>${applicationVersion}</b> - <a href=\"${applicationStashCommitUrl}\">${applicationCommitHash}</a>"
+          updateBuildDescription(applicationSourceBranchType, prHtml, applicationHtml)
+        }
+        echo "Finish checkout"
+      }
+
+
+      stage('Build') {
+        withCredentials([aws(credentialsId: evertzio_codeartifact_read, accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
+          withEnv(["APPLICATION_NAME=${APPLICATION_NAME}"]) {
+            dir(APPLICATION_NAME) {
+              def dockerEnv = docker.build("file-store-manager-test-image", "./build_scripts")
+              dockerEnv.inside('--security-opt apparmor:unconfined --privileged=true -u root --cap-add SYS_ADMIN') {
+                sh '''#!/bin/bash -xe
+                JUNIT_XML_RESULT=$PWD/junit.xml
+                if [ -f $JUNIT_XML_RESULT ]; then
+                    \rm $JUNIT_XML_RESULT;
+                fi
+
+                export SOURCE_TEMPLATE=template.yaml
+                export PACKAGE_DIR=./file_store_manager/
+                export UNIT_TEST_RESULTS="--junitxml=$JUNIT_XML_RESULT"
+                export TEMPLATE_FOLDER="templates"
+
+                set +x
+                export CODEARTIFACT_AUTH_TOKEN=`aws codeartifact get-authorization-token --domain evertz-io --domain-owner 737710810646 --query authorizationToken --output text --region us-east-1`
+                set -x
+
+                ./build_scripts/run_linters.sh
+                '''
+              }
+            }
+          }
+        }
+      }
+      stage("Push to AWS CodeCommit"){
+         echo 'Push stage'
+       if(env.BRANCH_NAME == MASTER_BRANCH){
+          echo 'Push to cloud'
+          dir(APPLICATION_NAME) {
+            parallel 'us-east-1': {
+              sshagent(credentials: [repository_credentials]) {
+                sh(returnStdout: true, script: """
+                  ssh-keyscan -H  git-codecommit.us-east-1.amazonaws.com >> ~/.ssh/known_hosts
+                  git push \
+                      --verbose \
+                      --follow-tags \
+                      --force \
+                      ${us_east_1} \
+                      '+remotes/origin/${BRANCH_NAME}:refs/heads/${BRANCH_NAME}'
+                """)
+              }
+            },
+            'eu-west-1': {
+              sshagent(credentials: [repository_credentials]) {
+                sh(returnStdout: true, script: """
+                  ssh-keyscan -H  git-codecommit.eu-west-1.amazonaws.com >> ~/.ssh/known_hosts
+                  git push \
+                      --verbose \
+                      --follow-tags \
+                      --force \
+                      ${eu_west_1} \
+                      '+remotes/origin/${BRANCH_NAME}:refs/heads/${BRANCH_NAME}'
+                """)
+              }
+            }
+          } /* dir(APPLICATION_NAME) */
+       }
+
+      } // end stage "Push to AWS CodeCommit"
+    }
+    currentBuild.setResult('SUCCESS')
+  }
+  catch(err) {
+    setBuildAsFailure(err)
+  }
+  finally {
+      stage('Post Build') {
+        echo "publish junit"
+        publishJUnitReport("${APPLICATION_NAME}/junit.xml", true)
+
+        if (isEmailNotificationRequired(currentBuild)) {
+            def emailBuildDescription = """
+${prText}
+${APPLICATION_NAME}: ${applicationText}\n\n
+Branch Type: ${applicationSourceBranchType}\n
+Node: ${env.NODE_NAME}\n
+        """
+
+          sendEmailNotification(currentBuild, emailBuildDescription)
+        }
+        cleanWs()
+        echo "end of the build"
+      }
+  }
+}
+
+
+/**
+ * Updates build description with specified info
+ */
+def updateBuildDescription(branchType, prHtml, applicationHtml) {
+  currentBuild.description = """
+    ${prHtml}
+    ${APPLICATION_NAME}: ${applicationHtml}<br/>
+    Branch Type: <b>${branchType}</b><br/>
+    Node: <b>${env.NODE_NAME}</b><br/>
+  """
+}

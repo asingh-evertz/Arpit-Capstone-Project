@@ -1,0 +1,165 @@
+AWSTemplateFormatVersion: 2010-09-09
+Transform: AWS::Serverless-2016-10-31
+Description: File Store Manager
+Metadata:
+  cfn-lint:
+    config:
+      ignore_checks:
+      - E2532
+Parameters:
+  Name:
+    Type: String
+    Description: A String that can be used to Identify Resources created by this Template.
+      Resources may use this Parameter when creating the Name Tag. The Name Tag is
+      commonly used by the AWS Console to provide a friendlier name to Resources.
+      This may be used to form part of a Name Tag.
+  Owner:
+    Type: String
+    Description: The email address for the Team that owns the Resources created by
+      this Template.
+    AllowedPattern: ^(.*@evertz\.(io|com|tv),?)+$
+    ConstraintDescription: Must be an evertz.com,.io or .tv email address
+    Default: akumar@evertz.com
+  Project:
+    Type: String
+    Description: The name of the Project that the Resources created by this Template
+      belong to. A Team may own many Projects.
+    Default: file-store-manager
+  LogLevel:
+    Type: String
+    Default: INFO
+    AllowedValues:
+    - INFO
+    - WARNING
+    - ERROR
+    - CRITICAL
+    - DEBUG
+  DeletionPolicyParam:
+    Type: String
+    Default: Retain
+    AllowedValues:
+    - Delete
+    - Retain
+  BasePath:
+    Type: String
+    Default: file-store-manager
+  EventBus:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /infrastructure/event-driven-architecture/bus/name
+  Environment:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /account/environment
+Globals:
+  Function:
+    Runtime: python3.9
+    MemorySize: 512
+    Timeout: 30
+    AutoPublishAlias: live
+    Architectures:
+    - arm64
+    Layers:
+    - '{{resolve:ssm:/layer/evertz-io-honeycomb-otel-config-extension-v1-0-0:1}}'
+    - '{{resolve:ssm:/layer/otel-collector-ver-0-2-0/arm64:1}}'
+    Environment:
+      Variables:
+        LOG_LEVEL:
+          Ref: LogLevel
+        PROJECT:
+          Ref: Project
+        DEPLOYMENT_ENVIRONMENT:
+          Ref: Environment
+        OTEL_SERVICE_NAME:
+          Ref: Project
+        OTEL_PROPAGATORS: tracecontext
+        OTEL_INSTRUMENTATION_AWS_LAMBDA_FLUSH_TIMEOUT: 2000
+        OPENTELEMETRY_COLLECTOR_CONFIG_FILE: '{{resolve:ssm:/honeycomb/config/path:1}}'
+        EVENTS_SERVICE_NAME:
+          Ref: Project
+        EVENTS_EVENT_BUS:
+          Ref: EventBus
+        RESTRICTED_ROLE: []
+    Tags:
+      Name:
+        Ref: Name
+      Owner:
+        Ref: Owner
+      Project:
+        Ref: Project
+      Group: evertz.io
+      billing_category: Variable
+      classification: file-store-manager
+Resources:
+  API:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name:
+        Fn::Sub: ${Name}
+      EndpointConfiguration: REGIONAL
+      Cors:
+        AllowOrigin: '''*'''
+        AllowHeaders: '''Authorization,Content-Type,X-Correlation-ID'''
+        MaxAge: 600
+      StageName: v1
+      TracingEnabled: false
+      DefinitionBody:
+        Fn::Transform:
+          Name: AWS::Include
+          Parameters:
+            Location: s3://dev-templates-us-east-1/file-store-manager-amane-Artifacts/a25f19c886e7b20805bc0cd4261b8050
+      MethodSettings:
+      - LoggingLevel:
+          Ref: LogLevel
+        MetricsEnabled: true
+        DataTraceEnabled: false
+        ResourcePath: /*
+        HttpMethod: '*'
+  RegionalBasePathMapping:
+    Type: AWS::ApiGateway::BasePathMapping
+    Properties:
+      BasePath:
+        Ref: BasePath
+      DomainName:
+        Fn::ImportValue: APIGATEWAY-DOMAIN-NAME
+      RestApiId:
+        Ref: API
+      Stage:
+        Fn::Sub: ${API.Stage}
+  HelloWorld:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://dev-templates-us-east-1/file-store-manager-amane-Artifacts/aca4f8653bdbed506817b3ec79db3586
+      Handler: apigateway_handler.hello_world
+      Role:
+        Fn::GetAtt:
+        - HelloWorldRole
+        - Arn
+      DeploymentPreference:
+        Type: AllAtOnce
+        Role:
+          Fn::ImportValue: CODEDEPLOY-ROLE-ARN
+      Events:
+        HelloWorld:
+          Type: Api
+          Properties:
+            Method: get
+            Path: /hello-world
+            RestApiId:
+              Ref: API
+      Environment:
+        Variables:
+          RESTRICTED_ROLE: ''
+  HelloWorldRole:
+    Type: AWS::IAM::Role
+    Properties:
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Sid: AllowLambdaServiceToAssumeRole
+          Principal:
+            Service:
+            - Fn::Sub: lambda.${AWS::URLSuffix}
+          Action:
+          - sts:AssumeRole

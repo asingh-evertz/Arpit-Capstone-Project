@@ -1,0 +1,43 @@
+version: 0.2
+
+env:
+  variables:
+    PACKAGE_DIR: "file_store_manager"
+    SOURCE_TEMPLATE: "templates/template.yaml"
+    TEMPLATE_FOLDER: "templates"
+    BUILD_TEMPLATE: "template-export.yaml"
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.9
+
+  pre_build:
+    commands:
+      - pip install --upgrade awscli>=1.16.38
+      - pip install --upgrade pipenv --upgrade-strategy eager pip==21.1.1
+      - echo "CodeBuild Image ${CODEBUILD_BUILD_IMAGE}"
+      - export CODEARTIFACT_AUTH_TOKEN=`aws codeartifact get-authorization-token --domain evertz-io --domain-owner 737710810646 --query authorizationToken --output text --region us-east-1`
+      - ./build_scripts/run_linters.sh
+
+  build:
+    commands:
+      - pipenv requirements > requirements.txt
+      - sed -i 's/-e //g' requirements.txt
+      - pipenv run pip install --upgrade -r requirements.txt --target ${PACKAGE_DIR}
+
+      - aws cloudformation package
+        --template ${SOURCE_TEMPLATE}
+        --s3-bucket ${S3_BUCKET}
+        --s3-prefix ${PROJECT}-Artifacts
+        --output-template ${BUILD_TEMPLATE}
+
+  post_build:
+    commands:
+      - echo "build completed"
+
+artifacts:
+  type: zip
+  files:
+    - ${BUILD_TEMPLATE}
+    - template-configuration.json

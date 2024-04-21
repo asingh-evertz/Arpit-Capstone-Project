@@ -1,0 +1,47 @@
+[[source]]
+url = "https://aws:${CODEARTIFACT_AUTH_TOKEN}@evertz-io-737710810646.d.codeartifact.us-east-1.amazonaws.com/pypi/evertz-io-repo/simple/"
+verify_ssl = true
+name = "repo.evertz.io"
+
+[packages]
+boto3 = "==1.24.76"
+aws-lambda-powertools = "==1.28.0"
+evertz-io-apigateway-utils = "==1.1.0"
+evertz-io-identity-lib = "==3.0.0"
+evertz-io-events = "==2.0.0"
+evertz-io-observability = "==3.4.0"
+marshmallow = "==3.18.0"
+marshmallow-enum = "==1.5.1"
+marshmallow-dataclass = "==8.5.8"
+file-store-client = "==6.2.1"
+user-management-client = "==3.0.1"
+# Must match aws-otel-python lambda layer
+eio-otel-semantic-conventions = "==0.4.0"
+opentelemetry-semantic-conventions = "==0.42b0"
+opentelemetry-api = "==1.21.0"
+opentelemetry-sdk = "==1.21.0"
+
+# Packages for export trace
+aws-requests-auth = "==0.4.3"
+opentelemetry-exporter-otlp = "==1.21.0"
+opentelemetry-instrumentation-botocore = "==0.42b0"
+opentelemetry-instrumentation-requests = "==0.42b0"
+
+[requires]
+python_version = "3.9"
+
+[pipenv]
+allow_prereleases = true
+
+[dev-packages]
+pytest = "==7.2.0"
+pytest-cov = "==3.0.0"
+pytest-env = "==0.6.2"
+pytest-socket = "==0.5.1"
+pytest-xdist = "==3.0.2"
+moto = "==4.0.5"
+isort = "==5.10.1"
+pylint = "==2.15.2"
+black = "==22.8.0"
+cfn-lint = "==0.65.0"
+bandit = "==1.7.4"
